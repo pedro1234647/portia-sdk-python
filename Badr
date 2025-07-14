@@ -1,0 +1,88 @@
+import os
+import json
+import requests
+from telegram import Bot
+from time import time, sleep
+
+# Telegram
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+bot = Bot(token=BOT_TOKEN)
+
+# ملف لتخزين Snapshot سابق
+SEEN_FILE = "seen.json"
+
+def load_seen():
+    if not os.path.exists(SEEN_FILE):
+        return {}
+    with open(SEEN_FILE, "r") as f:
+        return json.load(f)
+
+def save_seen(seen):
+    with open(SEEN_FILE, "w") as f:
+        json.dump(seen, f)
+
+def get_pairs():
+    url = "https://api.dexscreener.com/latest/dex/pairs/bsc"  # مثال: شبكة BSC
+    response = requests.get(url)
+    data = response.json()
+    return data["pairs"]
+
+def get_coin_twitter(contract_address):
+    # ابحث في CoinGecko عن العملة بهذا العقد
+    cg_url = "https://api.coingecko.com/api/v3/coins/list"
+    coins = requests.get(cg_url).json()
+    for coin in coins:
+        coin_id = coin['id']
+        coin_data = requests.get(f"https://api.coingecko.com/api/v3/coins/{coin_id}").json()
+        platforms = coin_data.get("platforms", {})
+        if contract_address in platforms.values():
+            twitter = coin_data['links'].get('twitter_screen_name')
+            if twitter:
+                return twitter
+    return None
+
+def check_pairs():
+    seen = load_seen()
+    pairs = get_pairs()
+
+    now = int(time())
+
+    for pair in pairs:
+        pair_address = pair['pairAddress']
+        created_at = pair.get('createdAtTimestamp') or 0
+
+        # احسب عمر الزوج بالدقائق
+        age_min = (now - created_at) / 60
+
+        volume_usd = pair['volume']['h24'] if pair['volume'] else 0
+
+        # Snapshot سابق
+        previous = seen.get(pair_address, {"volume": 0})
+
+        if age_min >= 20 and volume_usd > previous["volume"]:
+            base_token = pair['baseToken']
+            contract = base_token.get('address')
+            twitter = get_coin_twitter(contract)
+
+            if twitter:
+                msg = f"""
+🚀 Pair: {pair['url']}
+⏱️ Age: {age_min:.1f} min
+📈 Volume: ${volume_usd:,.0f}
+🐦 Twitter: https://twitter.com/{twitter}
+"""
+                bot.send_message(chat_id=CHAT_ID, text=msg)
+                print(f"🔔 Sent alert for pair: {pair_address}")
+
+        # تحديث Snapshot
+        seen[pair_address] = {"volume": volume_usd, "last_seen": now}
+
+    save_seen(seen)
+
+if __name__ == "__main__":
+    print("🤖 Bot running...")
+    while True:
+        check_pairs()
+        print("✅ Done. Sleeping 5 min...")
+        sleep(300)  # كل 5 دقائق
